@@ -356,18 +356,22 @@ class K93AnsChatCard extends HTMLElement {
     );
   }
 
-  _readByHtml(message) {
+  _captionHtml(message, locale, lang) {
     const readers = (this._readStates || [])
       .filter(
         (r) => r.user_id !== message.sender_user_id && r.last_read_at && r.last_read_at >= message.created
       )
       .map((r) => r.name);
-    if (!readers.length) return "";
-    return `<div class="read-by">${esc(this._str("readBy"))}: ${esc(readers.join(", "))}</div>`;
+    const timeHtml = `<span class="time" data-created="${esc(message.created)}">${esc(formatRelativeTime(message.created, locale, lang))}</span>`;
+    const readByHtml = readers.length
+      ? `${esc(this._str("readBy"))} ${esc(readers.join(", "))} - `
+      : "";
+    return `<div class="message-caption">${readByHtml}${timeHtml}</div>`;
   }
 
   _reactionsHtml(message) {
     const reactions = message.reactions || [];
+    if (!reactions.length) return "";
     const myId = this._hass?.user?.id;
     const pills = reactions
       .map((r) => {
@@ -378,6 +382,10 @@ class K93AnsChatCard extends HTMLElement {
         );
       })
       .join("");
+    return `<div class="reactions">${pills}</div>`;
+  }
+
+  _reactionCornerHtml(message) {
     const picker =
       this._openPickerMessageId === message.id
         ? `<div class="reaction-picker">${QUICK_REACTION_EMOJI.map(
@@ -386,9 +394,9 @@ class K93AnsChatCard extends HTMLElement {
           ).join("")}</div>`
         : "";
     return (
-      `<div class="reactions">${pills}` +
+      `<div class="reaction-corner">` +
       `<button type="button" class="add-reaction" data-add-reaction="${esc(message.id)}" aria-label="Add reaction">+</button>` +
-      `</div>${picker}`
+      `${picker}</div>`
     );
   }
 
@@ -399,12 +407,14 @@ class K93AnsChatCard extends HTMLElement {
     return (
       `<div class="message${isOwn ? " own" : ""}">` +
       this._avatarHtml(sender, senderKey) +
+      `<div class="bubble-column">` +
       `<div class="bubble">` +
-      `<div class="meta"><span class="sender-name">${esc(sender.name || "")}</span>` +
-      `<span class="time" data-created="${esc(message.created)}">${esc(formatRelativeTime(message.created, locale, lang))}</span></div>` +
+      `<div class="meta"><span class="sender-name">${esc(sender.name || "")}</span></div>` +
       `<div class="text">${esc(message.message)}</div>` +
       this._reactionsHtml(message) +
-      this._readByHtml(message) +
+      this._reactionCornerHtml(message) +
+      `</div>` +
+      this._captionHtml(message, locale, lang) +
       `</div></div>`
     );
   }
@@ -485,6 +495,7 @@ class K93AnsChatCard extends HTMLElement {
           flex-direction: column;
           overflow: hidden;
           height: 100%;
+          max-height: 480px;
         }
         .room-picker {
           flex: 0 0 auto;
@@ -581,7 +592,17 @@ class K93AnsChatCard extends HTMLElement {
           font-weight: bold;
           --mdc-icon-size: 18px;
         }
+        .bubble-column {
+          display: flex;
+          flex-direction: column;
+          gap: 3px;
+          min-width: 0;
+        }
+        .message.own .bubble-column {
+          align-items: flex-end;
+        }
         .bubble {
+          position: relative;
           display: flex;
           flex-direction: column;
           gap: 2px;
@@ -610,10 +631,11 @@ class K93AnsChatCard extends HTMLElement {
           word-break: break-word;
           font-size: 0.95em;
         }
-        .read-by {
+        .message-caption {
           font-size: 0.7em;
           color: var(--secondary-text-color);
           opacity: 0.8;
+          padding: 0 4px;
         }
         .reactions {
           display: flex;
@@ -642,6 +664,16 @@ class K93AnsChatCard extends HTMLElement {
           font-size: 0.85em;
           color: var(--secondary-text-color);
         }
+        .reaction-corner {
+          position: absolute;
+          top: 50%;
+          right: -10px;
+          transform: translateY(-50%);
+        }
+        .message.own .reaction-corner {
+          right: auto;
+          left: -10px;
+        }
         .add-reaction {
           display: inline-flex;
           align-items: center;
@@ -649,22 +681,34 @@ class K93AnsChatCard extends HTMLElement {
           width: 20px;
           height: 20px;
           border: 1px solid var(--divider-color);
-          background: transparent;
+          background: var(--card-background-color, var(--secondary-background-color, #fff));
           color: var(--secondary-text-color);
           border-radius: 999px;
           cursor: pointer;
           font-size: 0.85em;
           line-height: 1;
           padding: 0;
+          box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
         }
         .reaction-picker {
+          position: absolute;
+          top: 50%;
+          right: 100%;
+          transform: translateY(-50%);
+          margin-right: 6px;
           display: inline-flex;
           gap: 4px;
           padding: 4px 6px;
-          margin-top: 4px;
           border: 1px solid var(--divider-color);
           border-radius: 10px;
           background: var(--card-background-color, var(--secondary-background-color, #fff));
+          white-space: nowrap;
+        }
+        .message.own .reaction-picker {
+          right: auto;
+          left: 100%;
+          margin-right: 0;
+          margin-left: 6px;
         }
         .reaction-picker button {
           border: none;
@@ -769,8 +813,10 @@ class K93AnsChatCard extends HTMLElement {
     const cfg = this._config;
     if (cfg.card_height) {
       this._cardEl.style.height = `${Number(cfg.card_height)}px`;
+      this._cardEl.style.maxHeight = "none";
     } else {
       this._cardEl.style.removeProperty("height");
+      this._cardEl.style.removeProperty("max-height");
     }
     this._inputEl.placeholder = this._str("typeMessage");
     this._sendBtnEl.textContent = this._str("send");
