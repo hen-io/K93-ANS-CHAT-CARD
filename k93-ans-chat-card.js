@@ -3,7 +3,10 @@ const CARD_VERSION = "0.1.0";
 
 const LOCALE_TAG = { en: "en", no: "nb-NO" };
 
-const QUICK_REACTION_EMOJI = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
+const FALLBACK_REACTION_EMOJI = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
+
+const URL_PATTERN = /https?:\/\/[^\s<>"']+/i;
+const IMAGE_URL_PATTERN = /\.(?:jpe?g|png|gif|webp|svg)(?:[?#].*)?$/i;
 
 const STRINGS = {
   en: {
@@ -80,6 +83,8 @@ class K93AnsChatCard extends HTMLElement {
     this._readStates = [];
     this._accessDenied = false;
     this._openPickerMessageId = null;
+    this._reactionEmoji = FALLBACK_REACTION_EMOJI;
+    this._pendingImage = null;
     this._unsubscribeRoom = null;
     this._built = false;
     this._lastMessagesHtml = null;
@@ -170,6 +175,9 @@ class K93AnsChatCard extends HTMLElement {
     try {
       const result = await this._hass.callWS({ type: "k93_ans/chat/list_rooms" });
       this._rooms = result.chatrooms || [];
+      if (result.reaction_emoji && result.reaction_emoji.length) {
+        this._reactionEmoji = result.reaction_emoji;
+      }
     } catch (err) {
       console.error("k93-ans-chat-card: failed to list chatrooms", err);
       this._rooms = [];
@@ -202,6 +210,9 @@ class K93AnsChatCard extends HTMLElement {
       });
       this._messages = (result.messages || []).slice().reverse();
       this._readStates = result.read_states || [];
+      if (result.reaction_emoji && result.reaction_emoji.length) {
+        this._reactionEmoji = result.reaction_emoji;
+      }
       this._accessDenied = false;
     } catch (err) {
       this._messages = [];
@@ -291,18 +302,86 @@ class K93AnsChatCard extends HTMLElement {
     const input = this._inputEl;
     if (!input || !this._activeRoomId) return;
     const text = input.value.trim();
-    if (!text) return;
+    const pending = this._pendingImage;
+    if (!text && !pending) return;
     input.value = "";
     this._autosizeInput();
+    this._pendingImage = null;
+    this._renderComposerPreview();
     try {
-      await this._hass.callWS({
-        type: "k93_ans/chat/send",
-        chatroom_id: this._activeRoomId,
-        message: text,
-      });
+      const payload = { type: "k93_ans/chat/send", chatroom_id: this._activeRoomId, message: text };
+      if (pending) {
+        payload.image_base64 = pending.base64;
+        payload.image_content_type = pending.contentType;
+      }
+      await this._hass.callWS(payload);
     } catch (err) {
       console.error("k93-ans-chat-card: failed to send message", err);
+    } finally {
+      if (pending?.previewUrl) URL.revokeObjectURL(pending.previewUrl);
     }
+  }
+
+  async _resizeImageFile(file, maxDim = 1280, quality = 0.82) {
+    const bitmap = await createImageBitmap(file);
+    const scale = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height));
+    const width = Math.max(1, Math.round(bitmap.width * scale));
+    const height = Math.max(1, Math.round(bitmap.height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(bitmap, 0, 0, width, height);
+    bitmap.close?.();
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", quality));
+    const base64 = await this._blobToBase64(blob);
+    return { base64, contentType: "image/jpeg", previewUrl: URL.createObjectURL(blob) };
+  }
+
+  _blobToBase64(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const result = String(reader.result || "");
+        const commaIdx = result.indexOf(",");
+        resolve(commaIdx >= 0 ? result.slice(commaIdx + 1) : result);
+      };
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  async _onFileSelected(ev) {
+    const file = ev.target.files && ev.target.files[0];
+    ev.target.value = "";
+    if (!file || !file.type.startsWith("image/")) return;
+    try {
+      const resized = await this._resizeImageFile(file);
+      if (this._pendingImage?.previewUrl) URL.revokeObjectURL(this._pendingImage.previewUrl);
+      this._pendingImage = resized;
+      this._renderComposerPreview();
+    } catch (err) {
+      console.error("k93-ans-chat-card: failed to process image", err);
+    }
+  }
+
+  _clearPendingImage() {
+    if (this._pendingImage?.previewUrl) URL.revokeObjectURL(this._pendingImage.previewUrl);
+    this._pendingImage = null;
+    this._renderComposerPreview();
+  }
+
+  _renderComposerPreview() {
+    if (!this._composerPreviewEl) return;
+    if (!this._pendingImage) {
+      this._composerPreviewEl.hidden = true;
+      this._composerPreviewEl.innerHTML = "";
+      return;
+    }
+    this._composerPreviewEl.hidden = false;
+    this._composerPreviewEl.innerHTML =
+      `<img src="${esc(this._pendingImage.previewUrl)}" alt="" />` +
+      `<button type="button" class="composer-preview-remove" aria-label="Remove image">×</button>`;
   }
 
   _autosizeInput() {
@@ -356,12 +435,26 @@ class K93AnsChatCard extends HTMLElement {
     );
   }
 
-  _captionHtml(message, locale, lang) {
-    const readers = (this._readStates || [])
-      .filter(
-        (r) => r.user_id !== message.sender_user_id && r.last_read_at && r.last_read_at >= message.created
-      )
-      .map((r) => r.name);
+  _computeReadByMap() {
+    const map = new Map();
+    for (const r of this._readStates || []) {
+      if (!r.last_read_at) continue;
+      let target = null;
+      for (const m of this._messages) {
+        if (m.sender_user_id === r.user_id) continue;
+        if (m.created > r.last_read_at) break;
+        target = m;
+      }
+      if (target) {
+        if (!map.has(target.id)) map.set(target.id, []);
+        map.get(target.id).push(r.name);
+      }
+    }
+    return map;
+  }
+
+  _captionHtml(message, locale, lang, readByMap) {
+    const readers = readByMap.get(message.id) || [];
     const timeHtml = `<span class="time" data-created="${esc(message.created)}">${esc(formatRelativeTime(message.created, locale, lang))}</span>`;
     const readByHtml = readers.length
       ? `${esc(this._str("readBy"))} ${esc(readers.join(", "))} - `
@@ -388,7 +481,7 @@ class K93AnsChatCard extends HTMLElement {
   _reactionCornerHtml(message) {
     const picker =
       this._openPickerMessageId === message.id
-        ? `<div class="reaction-picker">${QUICK_REACTION_EMOJI.map(
+        ? `<div class="reaction-picker">${this._reactionEmoji.map(
             (emoji) =>
               `<button type="button" data-picker-emoji="${esc(emoji)}" data-message-id="${esc(message.id)}">${esc(emoji)}</button>`
           ).join("")}</div>`
@@ -400,21 +493,53 @@ class K93AnsChatCard extends HTMLElement {
     );
   }
 
-  _messageHtml(message, locale, lang) {
+  _messageImageHtml(message) {
+    if (!message.image) return "";
+    return (
+      `<a href="${esc(message.image)}" target="_blank" rel="noopener noreferrer">` +
+      `<img class="message-image" src="${esc(message.image)}" alt="" /></a>`
+    );
+  }
+
+  _urlPreviewHtml(text) {
+    const match = String(text || "").match(URL_PATTERN);
+    if (!match) return "";
+    let hostname;
+    try {
+      hostname = new URL(match[0]).hostname;
+    } catch (err) {
+      return "";
+    }
+    if (IMAGE_URL_PATTERN.test(match[0])) {
+      return (
+        `<a class="link-preview link-preview-image" href="${esc(match[0])}" target="_blank" rel="noopener noreferrer">` +
+        `<img src="${esc(match[0])}" alt="" /></a>`
+      );
+    }
+    return (
+      `<a class="link-preview" href="${esc(match[0])}" target="_blank" rel="noopener noreferrer">` +
+      `<ha-icon icon="mdi:link-variant"></ha-icon><span>${esc(hostname)}</span></a>`
+    );
+  }
+
+  _messageHtml(message, locale, lang, readByMap) {
     const sender = message.sender || {};
     const senderKey = message.sender_user_id || sender.name || "";
     const isOwn = Boolean(this._hass?.user && message.sender_user_id === this._hass.user.id);
+    const textHtml = message.message ? `<div class="text">${esc(message.message)}</div>` : "";
     return (
       `<div class="message${isOwn ? " own" : ""}">` +
       this._avatarHtml(sender, senderKey) +
       `<div class="bubble-column">` +
       `<div class="bubble">` +
       `<div class="meta"><span class="sender-name">${esc(sender.name || "")}</span></div>` +
-      `<div class="text">${esc(message.message)}</div>` +
+      this._messageImageHtml(message) +
+      textHtml +
+      this._urlPreviewHtml(message.message) +
       this._reactionsHtml(message) +
       this._reactionCornerHtml(message) +
       `</div>` +
-      this._captionHtml(message, locale, lang) +
+      this._captionHtml(message, locale, lang, readByMap) +
       `</div></div>`
     );
   }
@@ -431,7 +556,8 @@ class K93AnsChatCard extends HTMLElement {
     }
     const lang = this._lang();
     const locale = LOCALE_TAG[lang] || undefined;
-    return this._messages.map((m) => this._messageHtml(m, locale, lang)).join("");
+    const readByMap = this._computeReadByMap();
+    return this._messages.map((m) => this._messageHtml(m, locale, lang, readByMap)).join("");
   }
 
   _isScrolledNearBottom() {
@@ -632,6 +758,43 @@ class K93AnsChatCard extends HTMLElement {
           word-break: break-word;
           font-size: 0.95em;
         }
+        .message-image {
+          display: block;
+          max-width: 220px;
+          max-height: 220px;
+          border-radius: 8px;
+          object-fit: cover;
+        }
+        .link-preview {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          padding: 5px 10px;
+          border: 1px solid var(--divider-color);
+          border-radius: 8px;
+          color: var(--primary-text-color);
+          text-decoration: none;
+          font-size: 0.85em;
+          max-width: 220px;
+        }
+        .link-preview span {
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .link-preview-image {
+          display: block;
+          padding: 0;
+          border: none;
+          max-width: 220px;
+        }
+        .link-preview-image img {
+          display: block;
+          max-width: 220px;
+          max-height: 220px;
+          border-radius: 8px;
+          object-fit: cover;
+        }
         .message-caption {
           font-size: 0.7em;
           color: var(--secondary-text-color);
@@ -713,10 +876,54 @@ class K93AnsChatCard extends HTMLElement {
         .composer {
           flex: 0 0 auto;
           display: flex;
-          align-items: flex-end;
-          gap: 8px;
+          flex-direction: column;
+          gap: 6px;
           padding: 8px 12px;
           border-top: 1px solid var(--divider-color);
+        }
+        .composer-preview {
+          position: relative;
+          width: fit-content;
+        }
+        .composer-preview img {
+          display: block;
+          max-height: 80px;
+          max-width: 120px;
+          border-radius: 8px;
+          object-fit: cover;
+        }
+        .composer-preview-remove {
+          position: absolute;
+          top: -6px;
+          right: -6px;
+          width: 20px;
+          height: 20px;
+          border-radius: 999px;
+          border: none;
+          background: var(--error-color, #ff453a);
+          color: #fff;
+          cursor: pointer;
+          line-height: 1;
+          font-size: 0.9em;
+          padding: 0;
+        }
+        .composer-row {
+          display: flex;
+          align-items: flex-end;
+          gap: 8px;
+        }
+        .composer-attach {
+          flex-shrink: 0;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 36px;
+          height: 36px;
+          border: 1px solid var(--divider-color);
+          border-radius: 10px;
+          background: transparent;
+          color: var(--secondary-text-color);
+          cursor: pointer;
         }
         .composer-input {
           flex: 1 1 auto;
@@ -750,8 +957,15 @@ class K93AnsChatCard extends HTMLElement {
         <div class="room-picker"></div>
         <div class="messages"></div>
         <div class="composer">
-          <textarea class="composer-input" rows="1"></textarea>
-          <button type="button" class="composer-send"></button>
+          <div class="composer-preview" hidden></div>
+          <div class="composer-row">
+            <button type="button" class="composer-attach" aria-label="Attach image">
+              <ha-icon icon="mdi:image-plus"></ha-icon>
+            </button>
+            <input type="file" accept="image/*" class="composer-file-input" hidden />
+            <textarea class="composer-input" rows="1"></textarea>
+            <button type="button" class="composer-send"></button>
+          </div>
         </div>
       </ha-card>
       `;
@@ -761,8 +975,16 @@ class K93AnsChatCard extends HTMLElement {
       this._messagesEl = this.shadowRoot.querySelector(".messages");
       this._inputEl = this.shadowRoot.querySelector(".composer-input");
       this._sendBtnEl = this.shadowRoot.querySelector(".composer-send");
+      this._composerPreviewEl = this.shadowRoot.querySelector(".composer-preview");
+      this._attachBtnEl = this.shadowRoot.querySelector(".composer-attach");
+      this._fileInputEl = this.shadowRoot.querySelector(".composer-file-input");
 
       this._sendBtnEl.addEventListener("click", () => this._sendMessage());
+      this._attachBtnEl.addEventListener("click", () => this._fileInputEl.click());
+      this._fileInputEl.addEventListener("change", (ev) => this._onFileSelected(ev));
+      this._composerPreviewEl.addEventListener("click", (ev) => {
+        if (ev.target.closest(".composer-preview-remove")) this._clearPendingImage();
+      });
       this._inputEl.addEventListener("input", () => this._autosizeInput());
       this._inputEl.addEventListener("keydown", (ev) => {
         if (ev.key === "Enter" && !ev.shiftKey) {
