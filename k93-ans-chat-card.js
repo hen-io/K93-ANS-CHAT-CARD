@@ -666,13 +666,8 @@ class K93AnsChatCard extends HTMLElement {
         }
         .reaction-corner {
           position: absolute;
-          top: 50%;
-          right: -10px;
-          transform: translateY(-50%);
-        }
-        .message.own .reaction-corner {
-          right: auto;
-          left: -10px;
+          bottom: -8px;
+          left: -8px;
         }
         .add-reaction {
           display: inline-flex;
@@ -692,10 +687,9 @@ class K93AnsChatCard extends HTMLElement {
         }
         .reaction-picker {
           position: absolute;
-          top: 50%;
-          right: 100%;
-          transform: translateY(-50%);
-          margin-right: 6px;
+          bottom: 100%;
+          left: 0;
+          margin-bottom: 6px;
           display: inline-flex;
           gap: 4px;
           padding: 4px 6px;
@@ -703,12 +697,6 @@ class K93AnsChatCard extends HTMLElement {
           border-radius: 10px;
           background: var(--card-background-color, var(--secondary-background-color, #fff));
           white-space: nowrap;
-        }
-        .message.own .reaction-picker {
-          right: auto;
-          left: 100%;
-          margin-right: 0;
-          margin-left: 6px;
         }
         .reaction-picker button {
           border: none;
