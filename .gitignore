@@ -1,0 +1,9 @@
+node_modules/
+dist/
+
+.vscode/
+.idea/
+*.swp
+.github/
+.DS_Store
+Thumbs.db
