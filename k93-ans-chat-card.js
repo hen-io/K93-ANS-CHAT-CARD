@@ -3,6 +3,8 @@ const CARD_VERSION = "0.1.0";
 
 const LOCALE_TAG = { en: "en", no: "nb-NO" };
 
+const QUICK_REACTION_EMOJI = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
+
 const STRINGS = {
   en: {
     yesterday: "Yesterday",
@@ -77,6 +79,7 @@ class K93AnsChatCard extends HTMLElement {
     this._messages = [];
     this._readStates = [];
     this._accessDenied = false;
+    this._openPickerMessageId = null;
     this._unsubscribeRoom = null;
     this._built = false;
     this._lastMessagesHtml = null;
@@ -133,6 +136,10 @@ class K93AnsChatCard extends HTMLElement {
       this._clockInterval = setInterval(() => this._refreshRelativeTimestamps(), 30000);
     }
     document.addEventListener("visibilitychange", this._onVisibilityChange);
+    if (this._activeRoomId && this._hass) {
+      this._fetchMessages(this._activeRoomId);
+      if (!this._unsubscribeRoom) this._subscribeRoom(this._activeRoomId);
+    }
     this._maybeMarkRead();
   }
 
@@ -213,6 +220,7 @@ class K93AnsChatCard extends HTMLElement {
         (msg) => {
           if (msg.message) this._onMessage(msg.message);
           if (msg.read) this._onRead(msg.read);
+          if (msg.reaction) this._onReaction(msg.reaction);
         },
         { type: "k93_ans/chat/subscribe", chatroom_id: chatroomId }
       );
@@ -244,6 +252,31 @@ class K93AnsChatCard extends HTMLElement {
       this._readStates = [...this._readStates, { user_id: read.user_id, last_read_at: now }];
     }
     this._render();
+  }
+
+  _onReaction(payload) {
+    const idx = this._messages.findIndex((m) => m.id === payload.message_id);
+    if (idx < 0) return;
+    this._messages = [
+      ...this._messages.slice(0, idx),
+      { ...this._messages[idx], reactions: payload.reactions },
+      ...this._messages.slice(idx + 1),
+    ];
+    this._render();
+  }
+
+  async _toggleReaction(messageId, emoji) {
+    if (!this._activeRoomId || !messageId || !emoji) return;
+    try {
+      await this._hass.callWS({
+        type: "k93_ans/chat/toggle_reaction",
+        chatroom_id: this._activeRoomId,
+        message_id: messageId,
+        emoji,
+      });
+    } catch (err) {
+      console.error("k93-ans-chat-card: failed to toggle reaction", err);
+    }
   }
 
   _maybeMarkRead() {
@@ -333,6 +366,32 @@ class K93AnsChatCard extends HTMLElement {
     return `<div class="read-by">${esc(this._str("readBy"))}: ${esc(readers.join(", "))}</div>`;
   }
 
+  _reactionsHtml(message) {
+    const reactions = message.reactions || [];
+    const myId = this._hass?.user?.id;
+    const pills = reactions
+      .map((r) => {
+        const mine = myId && r.user_ids.includes(myId) ? " mine" : "";
+        return (
+          `<button type="button" class="reaction-pill${mine}" data-toggle-emoji="${esc(r.emoji)}" data-message-id="${esc(message.id)}">` +
+          `${esc(r.emoji)}<span class="reaction-count">${r.count}</span></button>`
+        );
+      })
+      .join("");
+    const picker =
+      this._openPickerMessageId === message.id
+        ? `<div class="reaction-picker">${QUICK_REACTION_EMOJI.map(
+            (emoji) =>
+              `<button type="button" data-picker-emoji="${esc(emoji)}" data-message-id="${esc(message.id)}">${esc(emoji)}</button>`
+          ).join("")}</div>`
+        : "";
+    return (
+      `<div class="reactions">${pills}` +
+      `<button type="button" class="add-reaction" data-add-reaction="${esc(message.id)}" aria-label="Add reaction">+</button>` +
+      `</div>${picker}`
+    );
+  }
+
   _messageHtml(message, locale, lang) {
     const sender = message.sender || {};
     const senderKey = message.sender_user_id || sender.name || "";
@@ -344,6 +403,7 @@ class K93AnsChatCard extends HTMLElement {
       `<div class="meta"><span class="sender-name">${esc(sender.name || "")}</span>` +
       `<span class="time" data-created="${esc(message.created)}">${esc(formatRelativeTime(message.created, locale, lang))}</span></div>` +
       `<div class="text">${esc(message.message)}</div>` +
+      this._reactionsHtml(message) +
       this._readByHtml(message) +
       `</div></div>`
     );
@@ -555,6 +615,66 @@ class K93AnsChatCard extends HTMLElement {
           color: var(--secondary-text-color);
           opacity: 0.8;
         }
+        .reactions {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: center;
+          gap: 4px;
+          margin-top: 2px;
+        }
+        .reaction-pill {
+          display: inline-flex;
+          align-items: center;
+          gap: 3px;
+          border: 1px solid var(--divider-color);
+          background: transparent;
+          border-radius: 999px;
+          padding: 1px 7px;
+          font-size: 0.85em;
+          line-height: 1.7;
+          cursor: pointer;
+        }
+        .reaction-pill.mine {
+          border-color: var(--primary-color, #0a84ff);
+          background: color-mix(in srgb, var(--primary-color, #0a84ff) 16%, transparent);
+        }
+        .reaction-count {
+          font-size: 0.85em;
+          color: var(--secondary-text-color);
+        }
+        .add-reaction {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 20px;
+          height: 20px;
+          border: 1px solid var(--divider-color);
+          background: transparent;
+          color: var(--secondary-text-color);
+          border-radius: 999px;
+          cursor: pointer;
+          font-size: 0.85em;
+          line-height: 1;
+          padding: 0;
+        }
+        .reaction-picker {
+          display: inline-flex;
+          gap: 4px;
+          padding: 4px 6px;
+          margin-top: 4px;
+          border: 1px solid var(--divider-color);
+          border-radius: 10px;
+          background: var(--card-background-color, var(--secondary-background-color, #fff));
+        }
+        .reaction-picker button {
+          border: none;
+          background: transparent;
+          font-size: 1.1em;
+          line-height: 1;
+          cursor: pointer;
+          padding: 3px 4px;
+          border-radius: 6px;
+        }
         .composer {
           flex: 0 0 auto;
           display: flex;
@@ -618,6 +738,31 @@ class K93AnsChatCard extends HTMLElement {
       this._roomPickerEl.addEventListener("click", (ev) => {
         const chip = ev.target.closest("[data-room-id]");
         if (chip) this._selectRoom(chip.dataset.roomId);
+      });
+      this._messagesEl.addEventListener("click", (ev) => {
+        const pill = ev.target.closest("[data-toggle-emoji]");
+        if (pill) {
+          this._toggleReaction(pill.dataset.messageId, pill.dataset.toggleEmoji);
+          return;
+        }
+        const pickerChoice = ev.target.closest("[data-picker-emoji]");
+        if (pickerChoice) {
+          this._toggleReaction(pickerChoice.dataset.messageId, pickerChoice.dataset.pickerEmoji);
+          this._openPickerMessageId = null;
+          this._renderMessages();
+          return;
+        }
+        const addBtn = ev.target.closest("[data-add-reaction]");
+        if (addBtn) {
+          const id = addBtn.dataset.addReaction;
+          this._openPickerMessageId = this._openPickerMessageId === id ? null : id;
+          this._renderMessages();
+          return;
+        }
+        if (this._openPickerMessageId) {
+          this._openPickerMessageId = null;
+          this._renderMessages();
+        }
       });
     }
 
