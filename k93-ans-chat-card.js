@@ -553,6 +553,7 @@ class K93AnsChatCard extends HTMLElement {
           flex: 1 1 auto;
           min-height: 0;
           overflow-y: auto;
+          overflow-x: hidden;
           scrollbar-width: thin;
           padding: 12px;
           display: flex;
@@ -690,13 +691,15 @@ class K93AnsChatCard extends HTMLElement {
           bottom: 100%;
           left: 0;
           margin-bottom: 6px;
-          display: inline-flex;
+          display: flex;
+          flex-wrap: wrap;
           gap: 4px;
           padding: 4px 6px;
+          max-width: 180px;
           border: 1px solid var(--divider-color);
           border-radius: 10px;
           background: var(--card-background-color, var(--secondary-background-color, #fff));
-          white-space: nowrap;
+          box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
         }
         .reaction-picker button {
           border: none;
