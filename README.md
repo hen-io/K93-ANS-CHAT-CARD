@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-# K93 Advanced Notification System Chat lovelace card
+# K93 Advanced Notification System - Chat lovelace card
 
 A Home Assistant companion Lovelace card for the chat feature in K93 Advanced Notification System.
 
