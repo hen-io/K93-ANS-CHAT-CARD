@@ -621,7 +621,7 @@ class K93AnsChatCard extends HTMLElement {
           flex-direction: column;
           overflow: hidden;
           height: 100%;
-          max-height: 480px;
+          max-height: 85vh;
         }
         .room-picker {
           flex: 0 0 auto;
